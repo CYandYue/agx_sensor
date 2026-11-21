@@ -3,6 +3,6 @@
   "usb_listing": "Bus 002 Device 004: ID 8086:0b07 Intel Corp. \nBus 002 Device 003: ID 0bda:0411 Realtek Semiconductor Corp. USB3.2 Hub\nBus 002 Device 002: ID 0bda:0411 Realtek Semiconductor Corp. USB3.2 Hub\nBus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub\nBus 001 Device 007: ID 24a9:205a ASolid USB\nBus 001 Device 006: ID 1d50:606f OpenMoko, Inc. USB\nBus 001 Device 005: ID 10c4:ea60 Silicon Labs CP210x UART Bridge\nBus 001 Device 004: ID 0bda:5411 Realtek Semiconductor Corp. \nBus 001 Device 002: ID 0bda:5411 Realtek Semiconductor Corp. USB2.1 Hub\nBus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\n",
   "lidar_host_address_ready": true,
   "existing_sensor_processes": [],
-  "hardware_test_exit_code": 1,
-  "hardware_test_status": "FAILED"
+  "hardware_test_exit_code": 0,
+  "hardware_test_status": "PASS"
 }

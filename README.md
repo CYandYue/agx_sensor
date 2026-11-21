@@ -113,7 +113,7 @@ bash -c 'source devel/setup.bash; /usr/bin/python3 tests/smoke_pipeline.py --har
 ```
 
 合成测试用已知旋转和平移轨迹、静止三维点和非零镜头畸变驱动真实 C++ 节点，
-逐像素对照解析投影和相机位姿，并验证原始数据录制、合并和完整帧组校验。
+扫描内点顺序故意打乱，逐像素对照解析投影和相机位姿，并验证原始数据录制、合并和完整帧组校验。
 测试 bag 和日志保留于输出的临时目录。版本化结果放在 verification/，大 bag 不进 Git。
 
 来源：recorder 三个 Python 文件及录制测试基于用户已有

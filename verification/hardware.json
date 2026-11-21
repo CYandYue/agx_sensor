@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "frames": 81,
+  "actual_rate_hz": 5.963989619438104,
+  "min_depth_valid_fraction": 0.0006380208333333333,
+  "max_rgbd_delta_s": 0.0,
+  "max_odom_gap_s": 0.120505095,
+  "camera_pose_reproduced_from_raw_odometry": true,
+  "hardware_sync_verified": false,
+  "accuracy_validated": false,
+  "hardware": true,
+  "bag_bytes": 138818091,
+  "log_directory": "/tmp/lidar-rgbd-hardware-xiovbr7m",
+  "mean_valid_fraction": 0.0059890207047325105,
+  "mean_output_age_s": 0.45506354908884306,
+  "max_output_age_s": 0.7363667488098145
+}

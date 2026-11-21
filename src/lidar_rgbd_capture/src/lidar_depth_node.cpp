@@ -32,7 +32,8 @@ class Projector {
   std::vector<ros::Subscriber> subs_;
   ros::Publisher rgb_pub_, depth_pub_, ci_pub_, di_pub_, mask_pub_, pose_pub_, meta_pub_;
   ros::WallTimer timer_;
-  std::array<std::deque<Cloud::ConstPtr>,2> clouds_;
+  using Scan = std::pair<Cloud::ConstPtr,double>;
+  std::array<std::deque<Scan>,2> clouds_;
   std::deque<nav_msgs::Odometry::ConstPtr> odoms_;
   std::deque<sensor_msgs::CameraInfo::ConstPtr> infos_;
   std::deque<Pending> images_;
@@ -89,8 +90,8 @@ class Projector {
       throw std::runtime_error("Unsupported camera distortion model");
     for(const auto& stream:clouds_) {
       if(stream.empty()) return false;
-      const auto& last=*stream.back();
-      if(last.points.empty() || last.header.stamp.toSec()+last.points.back().offset_time*1e-9 < target+half_window_)
+      const auto& last=*stream.back().first;
+      if(last.points.empty() || stream.back().second < target+half_window_)
         return false;  // Wait for a complete, symmetric acquisition window.
     }
     Eigen::Isometry3d wb, dummy;
@@ -108,10 +109,11 @@ class Projector {
     std::array<std::vector<uint64_t>,2> scan_stamps;
     double first=std::numeric_limits<double>::infinity(),last=-first;
     double scan_first=first,scan_last=last;
-    for(int device=0;device<2;++device) for(const auto& msg:clouds_[device]) {
+    for(int device=0;device<2;++device) for(const auto& scan:clouds_[device]) {
+      const auto& msg=scan.first;
       double start=msg->header.stamp.toSec();
       if(msg->points.empty() || start>target+half_window_ ||
-         start+msg->points.back().offset_time*1e-9<target-half_window_) continue;
+         scan.second<target-half_window_) continue;
       ++scans[device]; scan_stamps[device].push_back(msg->header.stamp.toNSec()); scan_first=std::min(scan_first,start); scan_last=std::max(scan_last,start);
       for(const auto& p:msg->points) {
         double tp=start+p.offset_time*1e-9;
@@ -218,10 +220,12 @@ public:
       subs_.push_back(nh_.subscribe<Cloud>(topic,30,[this,i](const Cloud::ConstPtr& m){
         auto& stream=clouds_[i];
         if(m->header.stamp.isZero() || m->point_num!=m->points.size() || m->points.empty()) {fail("Invalid raw lidar message");return;}
-        if(!stream.empty() && m->header.stamp<=stream.back()->header.stamp) {fail("Lidar clock non-increasing");return;}
-        for(size_t j=1;j<m->points.size();++j) if(m->points[j].offset_time<m->points[j-1].offset_time) {fail("Lidar point times are unordered");return;}
-        if(m->points.back().offset_time>300000000) {fail("Unexpected lidar scan duration");return;}
-        stream.push_back(m);while(stream.size()>100)stream.pop_front();
+        if(!stream.empty() && m->header.stamp<=stream.back().first->header.stamp) {fail("Lidar clock non-increasing");return;}
+        uint32_t end_offset=0;
+        for(const auto& point:m->points)end_offset=std::max(end_offset,point.offset_time);
+        if(end_offset>300000000) {fail("Unexpected lidar scan duration");return;}
+        stream.emplace_back(m,m->header.stamp.toSec()+end_offset*1e-9);
+        while(stream.size()>100)stream.pop_front();
       },ros::VoidConstPtr(),ros::TransportHints().tcpNoDelay()));
     }
     timer_=nh_.createWallTimer(ros::WallDuration(.02),&Projector::tick,this);

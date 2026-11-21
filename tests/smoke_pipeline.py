@@ -96,6 +96,7 @@ def main():
                         for j,xyz in enumerate(local):
                             p=CustomPoint();p.offset_time=int(offsets[j]);p.tag=0x10;p.line=j%4
                             p.x,p.y,p.z=xyz;p.reflectivity=80;cloud.points.append(p)
+                        cloud.points.reverse() # Raw drivers need not order points by acquisition time.
                         cloud.point_num=len(cloud.points);pubs['/livox/lidar_192_168_1_'+ip].publish(cloud)
                 if i%8==0 and i>25:
                     image=Image();image.header.stamp=now;image.header.frame_id=ci.header.frame_id;image.header.seq=i//8
@@ -128,7 +129,7 @@ def main():
                 for _,cloud,_ in raw:
                     point_times=cloud.header.stamp.to_sec()+np.array([p.offset_time for p in cloud.points])*1e-9
                     use=np.abs(point_times-ns/1e9)<=.05
-                    if use.any():selected.append(world[use])
+                    if use.any():selected.append(world[::-1][use])
                 sampled=np.concatenate(selected)
                 pc=(wc[:3,:3].T@(sampled-wc[:3,3]).T).T
                 pixels,_=cv2.projectPoints(pc,np.zeros(3),np.zeros(3),np.array(ci.K).reshape(3,3),np.array(ci.D))
