@@ -7,3 +7,6 @@
 - *_artifacts.txt：完整 bag 与日志所在目录。
 
 所有测试均不启动底盘控制。合成测试不证明物理标定或硬件同步精度。
+
+- legacy_export.json：81 帧实机 bag 与旧 depth_camera PNG 格式对照，通过单位、无效值、RGB 同名和内参核对；源 bag 哈希保持不变。
+- legacy_export_tests.log：21 项离线测试结果。

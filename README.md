@@ -7,7 +7,9 @@
 ## 数据约定
 
 - RGB 保留相机原像素、原时间戳和畸变模型。
-- 深度为同尺寸 `32FC1`，数值是彩色光学坐标系的 **Z，单位米**，空洞为 NaN。
+- 在线与 bag 深度为同尺寸 `32FC1`，数值是彩色光学坐标系的 **Z，单位米**，空洞为 NaN。
+- 默认导出兼容旧 `my_dataset/depth_camera`：`depth_camera/<秒>_<9位纳秒>.png`，
+  单通道 16 位 `uint16`、毫米单位、空洞为 0；RGB 使用同名 PNG。
 - 每个有效像素来自时间窗口内的原始雷达测量。一个像素有多个点时取最近 Z。
   不扩散点、不补洞；像素栅格化本身仍有舍入误差。
 - `/lidar_rgbd/valid_mask` 为在线查看用的 `mono8` 有效掩码。最终 bag 中掩码可由深度有限值重建。
@@ -115,16 +117,57 @@ datasets/scene01.bag.report.json      # 实际帧率、帧数、原始话题计�
 cd /home/agilex/my_ws/lidar_rgbd_capture
 ./run.sh check datasets/scene01.bag
 
-# 保留原始 RGB 像素模型
+# 默认：兼容旧数据目录，保留原始 RGB 像素模型
 ./run.sh export datasets/scene01.bag datasets/scene01_export
 
-# 或同步对 RGB 和雷达深度去畸变
+# 可选：同步对 RGB 和雷达深度去畸变，仍输出毫米 PNG
 ./run.sh export datasets/scene01.bag datasets/scene01_rectified --rectify
+
+# 可选：保留浮点米制深度及 NaN，输出 depth/*.npy
+./run.sh export datasets/scene01.bag datasets/scene01_float --depth-format npy
 ```
 
-导出目录必须不存在。输出包含 `rgb/*.png`、浮点米制 `depth/*.npy`、`poses_tum.txt`、
-`frames.jsonl` 和 `dataset.json`。深度空洞为 NaN；按 `frames.jsonl` 的编号、路径和时间戳关联数据。
-服务器接收最终 `.bag` 即可；会话与录制报告也保存在 bag 内。样例和实测预览见文末。
+导出目录必须不存在。默认输出与旧深度读取方式一致：
+
+```text
+scene01_export/
+├── rgb/1795268297_415007353.png
+├── depth_camera/1795268297_415007353.png
+├── camera_intrinsics.yaml
+├── poses_tum.txt
+├── frames.jsonl
+└── dataset.json
+```
+
+RGB 和深度严格同名，文件名取原 RGB 时间戳；每张深度图与 RGB 同尺寸。
+`depth_camera/*.png` 是原始 16 位深度数据，未归一化、未上色；用下面的旧读取方式即可：
+
+```python
+import cv2
+import numpy as np
+
+depth_mm = cv2.imread('scene01_export/depth_camera/1795268297_415007353.png', cv2.IMREAD_UNCHANGED)
+valid = depth_mm > 0
+depth_m = depth_mm.astype(np.float32) / 1000.0
+```
+
+浮点米制深度导出时乘以 1000，取最近整数毫米（半毫米向上），原无效值变为 0。
+四舍五入后无法表示为 1～65535 的值也置 0，不通过截断或饱和伪造距离；数量记录在
+`depth_quantization.unrepresentable_pixels` 和 `dataset.json` 的 `depth_unrepresentable_pixels` 中。
+可表示的有效深度量化误差至多约 0.5 mm。默认不补洞，稀疏程度和像素对应关系不改变。
+
+`frames.jsonl` 中的 `depth_encoding`、`depth_scale_m`、`depth_valid_fraction` 描述**导出文件**；
+`source_depth_encoding`、`source_depth_scale_m`、`source_depth_valid_fraction` 保留 bag 中原值。
+因此默认 PNG 的 `depth_scale_m=0.001`，`--depth-format npy` 的 `depth_scale_m=1.0`。
+原始 bag 不被改写，在线消息与 bag 仍保持浮点米制精度，现有 bag 也可直接使用新导出器。
+
+`camera_intrinsics.yaml` 使用旧文件的 width/height/distortion_model/K/D/R/P 字段。
+为了保证这份单一内参文件对所有帧都成立，默认 PNG 导出拒绝像素模型在会话内变化的 bag。
+NPY 模式支持逐帧内参；模型发生变化时不生成全局 YAML，读取 `frames.jsonl` 中的逐帧内参。
+位姿仍是 `lio_map` 下的相机位姿，文件为 `poses_tum.txt`，不冒充旧的 odom/map 轨迹。
+
+按 `frames.jsonl` 的编号、路径和时间戳关联数据。服务器接收最终 `.bag` 即可；
+会话与录制报告也保存在 bag 内。样例和实测预览见文末。
 
 ## 在线发布与 bag
 
@@ -209,3 +252,18 @@ bash -c 'source devel/setup.bash; /usr/bin/python3 tests/smoke_pipeline.py --har
 - 对应报告：同名 `.bag.report.json`；副本哈希见 `verification/sample.json`。
 - 实机预览：`verification/hardware_rgb.png`、`hardware_projection_overlay.png`、`hardware_depth_preview.png`。
 - 录制结束后，测试所启动的全部 ROS/硬件进程已经退出；没有启动底盘控制。
+
+## 兼容旧 PNG 深度的导出验证
+
+当前共有 21 项离线测试通过。对首次实机 bag 的 81 帧执行默认导出后，
+逐帧验证了 640×480 单通道 uint16 PNG、RGB/深度同名、原 RGB 像素不变、
+空洞掩码不变、内参与旧 `/home/agilex/my_dataset/camera_intrinsics.yaml` 一致。
+149026 个有效深度像素的最大毫米量化误差约 0.5 mm；结果见 `verification/legacy_export.json`。
+
+已经生成的兼容样例位于 `datasets/static_trial_20261121_2138_legacy/`，包括
+`rgb/`、`depth_camera/`、`camera_intrinsics.yaml`、`poses_tum.txt` 和关联元数据。
+可重新执行离线验证（不启动硬件）：
+
+```bash
+bash -c 'source /opt/ros/noetic/setup.bash; /usr/bin/python3 tests/verify_legacy_export.py datasets/static_trial_20261121_2138.bag datasets/static_trial_20261121_2138_legacy --reference /home/agilex/my_dataset'
+```

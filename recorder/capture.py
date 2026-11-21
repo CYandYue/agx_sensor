@@ -453,8 +453,28 @@ def rectify_maps(info):
     raise ValueError('Unsupported distortion model for rectification: '+info.distortion_model)
 
 
+def depth_png_mm(depth, scale_m):
+    """Nearest integer millimeters; invalid/unrepresentable pixels stay zero."""
+    if not math.isfinite(scale_m) or scale_m <= 0:
+        raise ValueError('Depth scale must be finite and positive')
+    values = np.asarray(depth, dtype=np.float64)
+    with np.errstate(over='ignore', invalid='ignore'):
+        valid = np.isfinite(values) & (values > 0)
+        rounded = np.floor(values * (scale_m * 1000.0) + .5)
+        representable = valid & np.isfinite(rounded) & (rounded >= 1) & (rounded <= 65535)
+    output = np.zeros(values.shape, dtype=np.uint16)
+    output[representable] = rounded[representable].astype(np.uint16)
+    return output, dict(input_invalid_pixels=int(np.count_nonzero(~valid)),
+                        unrepresentable_pixels=int(np.count_nonzero(valid & ~representable)),
+                        output_valid_pixels=int(np.count_nonzero(representable)))
+
+
 def export(args):
     import cv2
+    import yaml
+    depth_format = getattr(args, 'depth_format', 'png')
+    if depth_format not in ('png', 'npy'):
+        raise ValueError('depth_format must be png or npy')
     source = Path(args.bag).expanduser().resolve()
     out = Path(args.output).expanduser().resolve()
     if out.exists():
@@ -462,8 +482,11 @@ def export(args):
     validation = check_bag(source)
     out.mkdir(parents=True)
     (out/'rgb').mkdir()
-    (out/'depth').mkdir()
+    depth_directory = 'depth_camera' if depth_format == 'png' else 'depth'
+    (out/depth_directory).mkdir()
     maps, previous_calibration = None, None
+    shared_calibration, calibration_changed = None, False
+    unrepresentable_total = 0
     try:
         with rosbag.Bag(str(source)) as bag, (out/'frames.jsonl').open('w') as frames, (out/'poses_tum.txt').open('w') as poses:
             session = read_session(bag)
@@ -487,24 +510,57 @@ def export(args):
                     exported['distortion_model'] = 'plumb_bob'
                     exported['R'] = list(np.eye(3).reshape(-1))
                     exported['P'] = list(np.column_stack((np.array(ci.K).reshape(3, 3), np.zeros(3))).reshape(-1))
-                name = '%06d_%d' % (meta['frame_index'], ns)
+                if shared_calibration is None:
+                    shared_calibration = copy.deepcopy(exported)
+                elif exported != shared_calibration:
+                    calibration_changed = True
+                    if depth_format == 'png':
+                        raise ValueError('Legacy PNG export requires a constant camera model for camera_intrinsics.yaml')
+                seconds_part, nanoseconds_part = divmod(ns, 1000000000)
+                name = '%d_%09d' % (seconds_part, nanoseconds_part)
                 rgb_path = 'rgb/'+name+'.png'
                 if not cv2.imwrite(str(out/rgb_path), color): raise IOError('PNG color write failed')
-                if dep.encoding == '16UC1':
-                    depth_path = 'depth/'+name+'.png'
+                source_encoding, source_scale = meta['depth_encoding'], meta['depth_scale_m']
+                source_valid_fraction = meta['depth_valid_fraction']
+                quantization = None
+                if depth_format == 'png':
+                    depth, quantization = depth_png_mm(depth, source_scale)
+                    unrepresentable_total += quantization['unrepresentable_pixels']
+                    depth_path = depth_directory+'/'+name+'.png'
                     if not cv2.imwrite(str(out/depth_path), depth): raise IOError('PNG depth write failed')
+                    exported_encoding, exported_scale, invalid_value = '16UC1', .001, 0
                 else:
-                    depth_path = 'depth/'+name+'.npy'
+                    depth = depth.astype(np.float32) * np.float32(source_scale)
+                    depth_path = depth_directory+'/'+name+'.npy'
                     np.save(str(out/depth_path), depth, allow_pickle=False)
+                    exported_encoding, exported_scale, invalid_value = '32FC1', 1.0, 'NaN or nonpositive'
                 p, q = pose.pose.position, pose.pose.orientation
                 seconds = '%d.%09d' % divmod(ns, 1000000000)
                 poses.write(seconds+' '+' '.join('%.12g'%v for v in (p.x,p.y,p.z,q.x,q.y,q.z,q.w))+'\n')
+                with np.errstate(invalid='ignore'):
+                    exported_valid_fraction = float(np.mean(np.isfinite(depth) & (depth > 0)))
                 meta.update(rgb_path=rgb_path, depth_path=depth_path, rectified=args.rectify,
+                            source_depth_encoding=source_encoding, source_depth_scale_m=source_scale,
+                            source_depth_valid_fraction=source_valid_fraction,
+                            depth_encoding=exported_encoding, depth_scale_m=exported_scale,
+                            depth_valid_fraction=exported_valid_fraction, depth_invalid_value=invalid_value,
+                            depth_format=depth_format, depth_quantization=quantization,
                             T_world_camera=pose_matrix(pose.pose).tolist(), T_body_camera=transform_matrix(ext).tolist(),
                             original_camera_info=original, exported_camera_info=exported)
                 frames.write(json.dumps(meta, allow_nan=False)+'\n')
+        calibration_file = None
+        if not calibration_changed and shared_calibration is not None:
+            calibration_file = 'camera_intrinsics.yaml'
+            fields = ('width', 'height', 'distortion_model', 'K', 'D', 'R', 'P')
+            # Normalize NumPy scalars from optional rectification before YAML.
+            camera_data = json.loads(json.dumps({key:shared_calibration[key] for key in fields}, allow_nan=False))
+            (out/calibration_file).write_text(yaml.safe_dump(camera_data, sort_keys=False))
         (out/'dataset.json').write_text(json.dumps(dict(session=session, validation=validation, rectified=args.rectify,
-                                                       source_bag=str(source), depth_resampling='nearest' if args.rectify else 'none'), indent=2)+'\n')
+                source_bag=str(source), depth_resampling='nearest' if args.rectify else 'none',
+                depth_format=depth_format, depth_encoding=exported_encoding, depth_scale_m=exported_scale,
+                depth_directory=depth_directory, depth_invalid_value=invalid_value,
+                depth_rounding='nearest millimeter, half up' if depth_format=='png' else None,
+                depth_unrepresentable_pixels=unrepresentable_total, camera_intrinsics_file=calibration_file), indent=2, allow_nan=False)+'\n')
     except BaseException:
         (out/'INCOMPLETE').write_text('Export failed; do not use as a complete dataset.\n')
         raise
@@ -536,6 +592,8 @@ def main():
     p.add_argument('bag')
     p.add_argument('output')
     p.add_argument('--rectify', action='store_true')
+    p.add_argument('--depth-format', choices=['png', 'npy'], default='png',
+                   help='png: legacy uint16 millimeters in depth_camera/ (default); npy: float32 meters in depth/')
     args = parser.parse_args()
     try:
         if args.command == 'record': record(args)

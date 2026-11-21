@@ -31,7 +31,7 @@ class FixtureEngine(Engine):
         if topic == RGB:
             super().ingest('/lidar_rgbd/projection',provenance(msg.header.stamp.to_nsec(),self.cfg,getattr(self,'fixture_valid',96)),arrival_ns,wall)
         return super().ingest(topic,msg,arrival_ns,wall)
-from capture import Writer, SESSION, REPORT, check_bag, frame_groups, export, rectify_maps
+from capture import Writer, SESSION, REPORT, check_bag, frame_groups, export, rectify_maps, depth_png_mm
 
 
 def image(t, depth=False, seq=0):
@@ -292,12 +292,91 @@ class CaptureTests(unittest.TestCase):
         bag = self.root/'float.bag'
         make_bag(bag,float_depth=True)
         out = self.root/'float_export'
-        export(SimpleNamespace(bag=str(bag),output=str(out),rectify=False))
+        export(SimpleNamespace(bag=str(bag),output=str(out),rectify=False,depth_format='npy'))
         row = json.loads((out/'frames.jsonl').read_text().splitlines()[0])
         depth = np.load(out/row['depth_path'])
         self.assertEqual(row['depth_scale_m'],1.0)
         self.assertTrue(np.isnan(depth[0,0]))
         self.assertAlmostEqual(float(depth[0,1]),1.001,places=6)
+
+    def test_depth_png_rounding_invalid_and_unrepresentable_values(self):
+        values=np.array([[np.nan,np.inf,-np.inf,-1,0,.0004,.0005,.00149,.0015,65.535,65.536]])
+        actual,counts=depth_png_mm(values,1.0)
+        np.testing.assert_array_equal(actual,[[0,0,0,0,0,0,1,1,2,65535,0]])
+        self.assertEqual(actual.dtype,np.uint16)
+        self.assertEqual(counts,dict(input_invalid_pixels=5,unrepresentable_pixels=2,output_valid_pixels=4))
+        converted,_=depth_png_mm(np.array([[1000,1001,0]],dtype=np.uint16),.002)
+        np.testing.assert_array_equal(converted,[[2000,2002,0]])
+        for scale in (0,-1,np.nan,np.inf):
+            with self.assertRaises(ValueError):depth_png_mm(values,scale)
+
+    def test_default_export_matches_legacy_png_layout_and_units(self):
+        import cv2
+        import yaml
+        bag=self.root/'float.bag';make_bag(bag,float_depth=True)
+        out=self.root/'legacy_export'
+        export(SimpleNamespace(bag=str(bag),output=str(out),rectify=False))
+        rows=[json.loads(line) for line in (out/'frames.jsonl').read_text().splitlines()]
+        self.assertEqual(len(rows),13)
+        self.assertEqual(len(list((out/'rgb').glob('*.png'))),13)
+        self.assertEqual(len(list((out/'depth_camera').glob('*.png'))),13)
+        self.assertFalse((out/'depth').exists())
+        for row in rows:
+            sec,nsec=divmod(row['rgb_stamp_ns'],1000000000)
+            expected='%d_%09d.png'%(sec,nsec)
+            self.assertEqual(row['rgb_path'],'rgb/'+expected)
+            self.assertEqual(row['depth_path'],'depth_camera/'+expected)
+        depth=cv2.imread(str(out/rows[0]['depth_path']),cv2.IMREAD_UNCHANGED)
+        self.assertEqual(depth.shape,(8,12));self.assertEqual(depth.dtype,np.uint16)
+        self.assertEqual(int(depth[0,0]),0);self.assertEqual(int(depth[0,1]),1001)
+        row=rows[0]
+        self.assertEqual(row['source_depth_encoding'],'32FC1')
+        self.assertEqual(row['source_depth_scale_m'],1.0)
+        self.assertEqual(row['depth_encoding'],'16UC1')
+        self.assertEqual(row['depth_scale_m'],.001)
+        self.assertEqual(row['depth_invalid_value'],0)
+        calibration=yaml.safe_load((out/'camera_intrinsics.yaml').read_text())
+        for key in ('width','height','distortion_model','K','D','R','P'):
+            self.assertEqual(calibration[key],row['exported_camera_info'][key])
+        dataset=json.loads((out/'dataset.json').read_text())
+        self.assertEqual(dataset['depth_scale_m'],.001)
+        self.assertEqual(dataset['camera_intrinsics_file'],'camera_intrinsics.yaml')
+        # Export does not rewrite source bag messages or their units.
+        self.assertEqual(check_bag(bag)['status'],'PASS')
+        with rosbag.Bag(str(bag)) as source:
+            message=next(source.read_messages(topics=[GROUP[1]])).message
+            self.assertEqual(message.encoding,'32FC1')
+            self.assertTrue(np.isnan(image_array(message)[0,0]))
+
+    def test_png_export_honors_source_depth_scale(self):
+        import cv2
+        bag=self.root/'scaled.bag';make_bag(bag,cfg=Config(depth_scale=.002))
+        out=self.root/'scaled_export'
+        export(SimpleNamespace(bag=str(bag),output=str(out),rectify=False))
+        row=json.loads((out/'frames.jsonl').read_text().splitlines()[0])
+        depth=cv2.imread(str(out/row['depth_path']),cv2.IMREAD_UNCHANGED)
+        self.assertEqual(int(depth[0,0]),2000)
+        self.assertEqual(row['source_depth_scale_m'],.002)
+        self.assertEqual(row['depth_scale_m'],.001)
+
+    def test_legacy_export_rejects_changing_global_calibration(self):
+        good,bad=self.root/'good.bag',self.root/'changing.bag'
+        make_bag(good)
+        with rosbag.Bag(str(good)) as src,rosbag.Bag(str(bad),'w') as dst:
+            for topic,msg,t in src.read_messages():
+                if topic in (GROUP[2],GROUP[3]) and msg.header.seq>=1:
+                    k=list(msg.K);k[0]+=1;msg.K=k
+                    projection=list(msg.P);projection[0]+=1;msg.P=projection
+                dst.write(topic,msg,t)
+        out=self.root/'changing_export'
+        with self.assertRaisesRegex(ValueError,'constant camera model'):
+            export(SimpleNamespace(bag=str(bad),output=str(out),rectify=False))
+        self.assertTrue((out/'INCOMPLETE').exists())
+        native=self.root/'changing_npy'
+        export(SimpleNamespace(bag=str(bad),output=str(native),rectify=False,depth_format='npy'))
+        self.assertFalse((native/'camera_intrinsics.yaml').exists())
+        dataset=json.loads((native/'dataset.json').read_text())
+        self.assertIsNone(dataset['camera_intrinsics_file'])
 
     def test_late_static_tf_then_changed_extrinsic(self):
         e = FixtureEngine(lambda *args:None,Config())
