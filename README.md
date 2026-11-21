@@ -123,3 +123,18 @@ bash -c 'source devel/setup.bash; /usr/bin/python3 tests/smoke_pipeline.py --har
 参考：[OpenCV 投影模型](https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html)、
 [ROS 深度约定 REP 118](https://github.com/ros-infrastructure/rep/blob/master/rep-0118.rst)、
 [MID360 官方参数](https://www.livoxtech.com/mid-360/specs)。
+
+## 本机首次实测（2026-11-21）
+
+17 项离线测试、乱序逐点时间的合成运动测试，以及双 MID360 + HI226 + D435 实机短测通过。
+实机完成 81 组 640×480 RGB/雷达深度，约 5.96 Hz，投影平均输出年龄 0.46 s、最大 0.74 s。
+两路原始雷达各 178 / 177 条，原始 IMU 均有数据；原始扫描来源核对和相机位姿复算通过。
+
+此场景平均有效深度覆盖约 0.60%，最小约 0.064%。画面下部存在大片雷达视场空白，
+不能把这一版当成稠密深度相机。投影叠加图只用于观察，尚无物理外参残差或运动精度认证。
+相机位置各轴变化范围约 4 / 5 / 7 mm，是这段短测的轨迹变化量，不是定位精度指标。
+
+- 样例 bag：`datasets/static_trial_20261121_2138.bag`（约 132 MiB，不进 Git）。
+- 对应报告：同名 `.bag.report.json`；副本哈希见 `verification/sample.json`。
+- 实机预览：`verification/hardware_rgb.png`、`hardware_projection_overlay.png`、`hardware_depth_preview.png`。
+- 录制结束后，测试所启动的全部 ROS/硬件进程已经退出；没有启动底盘控制。
