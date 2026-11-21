@@ -1,0 +1,20 @@
+{
+  "status": "PASS",
+  "frames": 29,
+  "actual_rate_hz": 6.03448200170937,
+  "min_depth_valid_fraction": 0.047526041666666664,
+  "max_rgbd_delta_s": 0.0,
+  "max_odom_gap_s": 0.025466681,
+  "camera_pose_reproduced_from_raw_odometry": true,
+  "hardware_sync_verified": false,
+  "accuracy_validated": false,
+  "hardware": false,
+  "bag_bytes": 932479,
+  "log_directory": "/tmp/lidar-rgbd-synthetic-5lhxqlvf",
+  "mean_valid_fraction": 0.0653398886494253,
+  "mean_output_age_s": 0.14834516623924518,
+  "max_output_age_s": 0.1927649974822998,
+  "analytic_depth_max_error_m": 4.711640571031239e-07,
+  "analytic_pose_matrix_max_error": 2.7755575615628914e-16,
+  "checked_depth_pixels": 5821
+}
