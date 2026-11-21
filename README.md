@@ -1,6 +1,6 @@
 # RealSense RGB + MID360 稀疏深度采集
 
-独立 Git 项目，部署位置为 `/home/agilex/my_ws/lidar_rgbd_capture`。
+独立 Git 项目（`my_ws` 下每个项目子目录各自管理 Git），部署位置为 `/home/agilex/my_ws/lidar_rgbd_capture`。
 复用 `/home/agilex/agilex_ws/lio_ws` 的双 MID360、HI226 和 FAST-LIO-MULTI，
 在线生成与 RealSense 彩色图像像素模型对应的雷达深度。RealSense 自带深度不参与输出。
 
@@ -17,43 +17,114 @@
 - RGB、投影深度、相机位姿的关联时刻为 RGB header。它们并非物理同时采样；
   每帧 JSON 保存真实点的采样时间范围和所用运动模型。
 
-## 构建和使用
+## 使用方法
 
-本机依赖：ROS Noetic、已构建的原 `agilex_ws/lio_ws`、Eigen、OpenCV、标准 ROS Python 消息、NumPy。
-厂家驱动和 LIO 源码没有复制进新项目。迁移机器时先准备这些依赖；可用
-`AGILEX_LIO_WS=/path/to/lio_ws ./build.sh` 指定另一份 LIO overlay。
+本机短测的**完整 RGB/雷达深度帧组约 5.96 Hz**，默认相机与投影上限均为 6 Hz。
+这是完整帧组速率；投影平均输出延迟约 0.46 s。实际速率、延迟和深度覆盖率随场景与负载变化。
+每次采集后，从 `.bag.report.json` 的 `actual_rate_hz` 查看实际帧率、从 `validation` 查看校验结果；
+每帧投影延迟保存在 `/dataset/frame` JSON 的 `projection.output_age_s` 中。
+
+### 1. 准备环境
+
+本机已经编译，可以直接启动。新拉取代码或修改 C++ 后，先执行：
 
 ```bash
 cd /home/agilex/my_ws/lidar_rgbd_capture
 ./build.sh
-
-# 终端 A：双雷达、HI226、相机、LIO 和在线投影；不启动底盘控制
-./start_sensors.sh
-
-# 终端 B：等待 IMU 初始化及投影 frames 持续增加，再录制
-./run.sh record /home/agilex/my_ws/lidar_rgbd_capture/datasets/scene01.bag
 ```
 
-默认相机 640×480、6 FPS，投影上限 6 Hz。录制上限默认 10 Hz，避免对 6 Hz 输出再次降频。默认不开 RViz，可传 `rviz:=true`；
-`imu_source:=mid360` 可切换至 A 雷达内置 IMU。原深度流仍开启以维持相机驱动原有
-camera_link 基准，但关闭深度对齐和 RGB-D 帧组同步，投影不读取原深度。
+依赖 ROS Noetic、已构建的 `/home/agilex/agilex_ws/lio_ws`、Eigen、OpenCV、标准 ROS Python 消息和 NumPy。
+厂家驱动和 LIO 源码没有复制进本仓库。迁移机器时需要先准备这些依赖；可用
+`AGILEX_LIO_WS=/path/to/lio_ws ./build.sh` 指定另一份 LIO overlay。入口脚本自动加载所需 ROS 环境。
 
-在录制终端按 Ctrl-C，继续等待 LIO 尾部和原始 bag 合并。看到 `Validated bag:`
-后再停止终端 A。原始录制器先等待订阅就绪；使用就绪前扫描的帧会跳过。校验逐帧核对所引用扫描确实存在于最终 bag。
-原始双雷达、两路内置 IMU 和外置 IMU 默认录制，必需的两路雷达及
-所选 IMU 缺失时拒绝生成成功文件。最终只需上传 `.bag`；旁边的 `.report.json` 方便快速检查。
-`.active`、`.partial`、`.raw.bag` 和 `.merge.active` 为中间或失败文件，不能当作完成的数据。
-输出拒绝覆盖，合并阶段需额外约一份数据空间。默认留存至少 2 GiB 空闲空间。
+确认双 MID360、D435 和 HI226 已连接。当前雷达配置地址为 `192.168.1.113` / `192.168.1.154`，
+主机雷达网口为 `192.168.1.4`，默认 HI226 串口为 `/dev/ttyUSB0`。
+先结束原厂家 GMapping/雷达 launch 和原 `rgbd_capture/start_sensors.sh`；新入口已包含驱动，
+同时启动会重复占用设备或发布 TF。
+
+### 2. 终端 A：启动传感器、LIO 和在线投影
 
 ```bash
+cd /home/agilex/my_ws/lidar_rgbd_capture
+./start_sensors.sh
+```
+
+启动后让机器人静止数秒，等待 IMU 初始化，并确认投影日志中的 `frames=...` 持续增长，再开始录制。
+默认相机 640×480、6 FPS，投影上限 6 Hz；默认不开 RViz，不启动底盘控制。
+RealSense 原深度流仍开启以维持驱动原有的 camera_link 基准，但关闭深度对齐和 RGB-D 帧组同步；
+输出深度全部来自 MID360，投影节点不读取 RealSense 深度。
+
+需要改变启动选项时，在终端 A 选用对应命令：
+
+```bash
+# 同时显示 RViz
+./start_sensors.sh rviz:=true
+
+# 改用 MID360 A 的内置 IMU
+./start_sensors.sh imu_source:=mid360
+```
+
+### 3. 终端 B：开始录制
+
+```bash
+cd /home/agilex/my_ws/lidar_rgbd_capture
+./run.sh record datasets/scene01.bag
+```
+
+`datasets/` 会自动创建。每次使用新文件名，程序拒绝覆盖已有 bag、报告或恢复文件。
+等待终端 B 的 `frames=...` 持续增加，表示已经录到有效完整帧组；仅看到启动日志不代表采集成功。
+
+默认会把 RGB、雷达投影深度、图像时刻的相机位姿、原始双雷达、已发布的原始 IMU、
+LIO odometry、TF、标定与会话信息一起录入最终 bag，不需要额外加 `--raw-sensors`。
+录制器上限默认 10 Hz，用于接收投影的约 6 Hz 输出，不会生成或补出 10 Hz 帧。
+
+也可以指定时长：
+
+```bash
+./run.sh record datasets/scene02.bag --duration 60
+```
+
+60 秒从采集进程启动时算起，包含准备时间；等待 LIO 尾部、合并和校验还会额外用时。
+
+### 4. 按顺序停止并检查结果
+
+1. 在**终端 B** 按 Ctrl-C 停止录制；定时录制会自动进入收尾。
+2. 保持终端 A 运行，等待 LIO 尾部、原始点云合并与校验。收尾可能需要几十秒。
+3. 看到 **`Validated bag: ...`** 后，再在**终端 A** 按 Ctrl-C 停止传感器。
+
+成功会得到：
+
+```text
+datasets/scene01.bag                  # 完整数据文件
+datasets/scene01.bag.report.json      # 实际帧率、帧数、原始话题计数和校验结果
+```
+
+报告中的 `status` 应为 `PASS`；`frames` 是完整帧组数，`actual_rate_hz` 是实际完成帧率。
+`PASS` 表示结构、扫描来源和位姿计算校验通过，不代表达到某个最低帧率或通过物理标定。
+
+原始录制器会先等待订阅就绪；使用就绪前扫描的帧会跳过。校验逐帧核对所引用扫描确实存在于最终 bag。
+两路雷达及所选 IMU 缺失时拒绝生成成功文件。`.active`、`.partial`、`.raw.bag`、
+`.raw.bag.active`、`.merge.active` 是中间或失败文件，不作为完成数据使用。
+合并阶段需额外约一份数据空间，程序默认留存至少 2 GiB 空闲空间。
+
+### 5. 离线校验和导出
+
+以下命令无需启动传感器或 ROS master：
+
+```bash
+cd /home/agilex/my_ws/lidar_rgbd_capture
 ./run.sh check datasets/scene01.bag
+
+# 保留原始 RGB 像素模型
 ./run.sh export datasets/scene01.bag datasets/scene01_export
-# 输出 RGB PNG、浮点深度 NPY、poses_tum.txt、frames.jsonl、dataset.json
+
+# 或同步对 RGB 和雷达深度去畸变
 ./run.sh export datasets/scene01.bag datasets/scene01_rectified --rectify
 ```
 
-原厂家 GMapping/雷达 launch 和原 rgbd_capture/start_sensors.sh 不要同时启动，
-它们会重复占用设备或发布 TF。新项目的传感器入口已包含所需驱动。
+导出目录必须不存在。输出包含 `rgb/*.png`、浮点米制 `depth/*.npy`、`poses_tum.txt`、
+`frames.jsonl` 和 `dataset.json`。深度空洞为 NaN；按 `frames.jsonl` 的编号、路径和时间戳关联数据。
+服务器接收最终 `.bag` 即可；会话与录制报告也保存在 bag 内。样例和实测预览见文末。
 
 ## 在线发布与 bag
 
