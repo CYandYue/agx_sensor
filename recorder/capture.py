@@ -20,7 +20,7 @@ from dataclasses import asdict
 
 import numpy as np
 import rosbag
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
@@ -50,7 +50,7 @@ def source_identity():
         commit, dirty = None, None
     return dict(git_commit=commit, git_dirty=dirty,
                 sha256={str(p.relative_to(here.parent)): hashlib.sha256(p.read_bytes()).hexdigest()
-                        for p in list(here.glob('*.py'))+list((here.parent/'src/lidar_rgbd_capture/src').glob('*.cpp'))+list((here.parent/'src/lidar_rgbd_capture/launch').glob('*.launch'))})
+                        for p in list(here.glob('*.py'))+list((here.parent/'src/lidar_rgbd_capture/src').glob('*.cpp'))+list((here.parent/'src/lidar_rgbd_capture/scripts').glob('*.py'))+list((here.parent/'src/lidar_rgbd_capture/launch').glob('*.launch'))})
 
 
 class Writer:
@@ -161,7 +161,7 @@ def record(args):
                    distortion_policy='RGB kept in native pixel model; lidar projection applies its CameraInfo distortion. Optional export --rectify.',
                    hardware_sync_verified=False,
                    calibration_status='Vendor/nominal mounting initial values, not a calibration certificate',
-                   parameters={p: rospy.get_param(p, {}) for p in ('/lio', '/lio_mounts', '/camera')})
+                   parameters={p: rospy.get_param(p, {}) for p in ('/lio', '/lio_mounts', '/lio_base_odometry', '/camera')})
     try:
         # Reserve the pathname exclusively before rosbag opens it.
         with active.open('xb'):
@@ -175,7 +175,9 @@ def record(args):
             raw_recording.wait_ready()
             engine.raw_min_stamp_ns = rospy.Time.now().to_nsec()
         topics = {RGB: Image, DEPTH: Image, RGB_INFO: CameraInfo, DEPTH_INFO: CameraInfo,
-                  '/lidar_rgbd/projection': String, EXTRA_INFO: CameraInfo, ODOM: Odometry, '/tf': TFMessage, '/tf_static': TFMessage}
+                  '/lidar_rgbd/projection': String, EXTRA_INFO: CameraInfo, ODOM: Odometry,
+                  '/lio/base_odometry': Odometry, '/lio/base_pose': PoseStamped,
+                  '/tf': TFMessage, '/tf_static': TFMessage}
         for topic in META_TOPICS:
             topics[topic] = rospy.AnyMsg
         for topic, cls in topics.items():

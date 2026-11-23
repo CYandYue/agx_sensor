@@ -1,0 +1,6 @@
+<launch>
+  <arg name="max_source_age" default="0.8"/>
+  <node pkg="lidar_rgbd_capture" type="base_odometry.py" name="lio_base_odometry" required="true" output="screen">
+    <param name="max_source_age" value="$(arg max_source_age)"/>
+  </node>
+</launch>

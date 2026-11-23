@@ -51,13 +51,14 @@ def main():
         from geometry_msgs.msg import TransformStamped
         from tf2_msgs.msg import TFMessage
         from livox_ros_driver2.msg import CustomMsg,CustomPoint
-        from tf.transformations import quaternion_from_matrix
+        from tf.transformations import quaternion_from_matrix,euler_matrix
         rospy.init_node('pipeline_fixture',disable_signals=True)
         start(['roslaunch','lidar_rgbd_capture','sensors.launch' if args.hardware else 'projector.launch'],'sensors.log')
         if args.hardware:
             # Drivers and LIO initialize before the recording duration starts.
             time.sleep(12)
         else:
+            start(['roslaunch','lidar_rgbd_capture','base_odometry.launch'],'base_odometry.log')
             pubs={t:rospy.Publisher(t,cls,queue_size=50,latch=t in ('/tf_static','/camera/color/camera_info')) for t,cls in [
                 ('/camera/color/image_raw',Image),('/camera/color/camera_info',CameraInfo),
                 ('/lio/odometry',Odometry),('/tf',TFMessage),('/tf_static',TFMessage),
@@ -69,6 +70,12 @@ def main():
             static=[]
             for child,x in [('camera_color_optical_frame',.1),('mid360_a_lidar',.2),('mid360_b_lidar',-.2)]:
                 t=TransformStamped();t.header.frame_id='body';t.child_frame_id=child;t.transform.translation.x=x;t.transform.rotation.w=1;static.append(t)
+            body_base=euler_matrix(.1,-.2,.15);body_base[:3,3]=[.3,-.1,.2]
+            base_tf=TransformStamped();base_tf.header.frame_id='body';base_tf.child_frame_id='base_link'
+            base_tf.transform.translation.x,base_tf.transform.translation.y,base_tf.transform.translation.z=body_base[:3,3]
+            q=quaternion_from_matrix(body_base)
+            base_tf.transform.rotation.x,base_tf.transform.rotation.y,base_tf.transform.rotation.z,base_tf.transform.rotation.w=q
+            static.append(base_tf)
             pubs['/tf_static'].publish(TFMessage(static));pubs['/camera/color/camera_info'].publish(ci)
             epoch=rospy.Time.now().to_sec()
             world=np.array([(x,y,z) for z in (3.,5.) for x in np.linspace(-1,1,13) for y in np.linspace(-.7,.7,11)])
@@ -116,6 +123,15 @@ def main():
         result['log_directory']=str(output)
         fractions=[];ages=[];error=0.;pose_error=0.;checked=0;best=None;best_fraction=0
         with rosbag.Bag(str(bag)) as data:
+            base_samples=list(data.read_messages(topics=['/lio/base_odometry']))
+            base_poses=list(data.read_messages(topics=['/lio/base_pose']))
+            assert len(base_samples)>10 and len(base_poses)>10,'Base pose topics missing from final bag'
+            assert all(m.header.frame_id=='lio_map' and m.child_frame_id=='base_link' for _,m,_ in base_samples)
+            result['base_odometry_count']=len(base_samples);result['base_pose_count']=len(base_poses)
+            if not args.hardware:
+                base_error=max(float(np.max(np.abs(pose_matrix(m.pose.pose)-body(m.header.stamp.to_sec())@body_base))) for _,m,_ in base_samples)
+                assert base_error<1e-8,base_error
+                result['analytic_base_pose_matrix_max_error']=base_error
             raw=list(data.read_messages(topics=['/livox/lidar_192_168_1_113','/livox/lidar_192_168_1_154'])) if not args.hardware else []
             for ns,g in frame_groups(data):
                 meta=json.loads(g[GROUP[-1]].data);fractions.append(meta['depth_valid_fraction']);ages.append(meta['projection']['output_age_s'])

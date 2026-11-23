@@ -1,0 +1,40 @@
+{
+  "status": "PASS",
+  "completed_utc": "2026-11-23T09:46:16+00:00",
+  "offline_tests": 27,
+  "synthetic_pipeline": {
+    "status": "PASS",
+    "frames": 24,
+    "actual_rate_hz": 6.252772407922509,
+    "min_depth_valid_fraction": 0.0361328125,
+    "max_rgbd_delta_s": 0.0,
+    "max_odom_gap_s": 0.024823904,
+    "camera_pose_reproduced_from_raw_odometry": true,
+    "hardware_sync_verified": false,
+    "accuracy_validated": false,
+    "hardware": false,
+    "bag_bytes": 912831,
+    "log_directory": "/tmp/lidar-rgbd-synthetic-i_nw67ve",
+    "base_odometry_count": 351,
+    "base_pose_count": 345,
+    "analytic_base_pose_matrix_max_error": 2.220446049250313e-16,
+    "mean_valid_fraction": 0.0489501953125,
+    "mean_output_age_s": 0.14645394682884216,
+    "max_output_age_s": 0.20892024040222168,
+    "analytic_depth_max_error_m": 4.753558071612929e-07,
+    "analytic_pose_matrix_max_error": 3.3306690738754696e-16,
+    "checked_depth_pixels": 3609
+  },
+  "recorded_hardware_bag_replay": {
+    "status": "PASS",
+    "hardware_opened": false,
+    "source_bag": "/home/agilex/my_ws/lidar_rgbd_capture/datasets/static_trial_20261121_2138.bag",
+    "input_samples": 169,
+    "output_samples": 169,
+    "analytic_base_pose_matrix_max_error": 1.734723475976807e-18,
+    "pose_covariance_min_eigenvalue": 5.2664632231393464e-08,
+    "source_timestamps_preserved": true,
+    "logs": "/tmp/lio-base-replay-kd0gertu"
+  },
+  "real_chassis_motion_test": "NOT_RUN"
+}

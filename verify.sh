@@ -5,5 +5,5 @@ test_args=("$@")
 set --
 source "$project_dir/devel/setup.bash"
 export PYTHONDONTWRITEBYTECODE=1
-/usr/bin/python3 -m unittest discover -s "$project_dir/tests" -p test_recorder.py -v
+/usr/bin/python3 -m unittest discover -s "$project_dir/tests" -p 'test_*.py' -v
 exec /usr/bin/python3 "$project_dir/tests/smoke_pipeline.py" "${test_args[@]}"

@@ -2,7 +2,8 @@
 
 独立 Git 项目（`my_ws` 下每个项目子目录各自管理 Git），部署位置为 `/home/agilex/my_ws/lidar_rgbd_capture`。
 复用 `/home/agilex/agilex_ws/lio_ws` 的双 MID360、HI226 和 FAST-LIO-MULTI，
-在线生成与 RealSense 彩色图像像素模型对应的雷达深度。RealSense 自带深度不参与输出。
+在线生成与 RealSense 彩色图像像素模型对应的雷达深度，并发布供导航/底盘闭环控制使用的 LIO 底盘位姿。
+RealSense 自带深度不参与输出；底盘位姿不使用轮式里程计。
 
 ## 数据约定
 
@@ -53,6 +54,8 @@ cd /home/agilex/my_ws/lidar_rgbd_capture
 
 启动后让机器人静止数秒，等待 IMU 初始化，并确认投影日志中的 `frames=...` 持续增长，再开始录制。
 默认相机 640×480、6 FPS，投影上限 6 Hz；默认不开 RViz，不启动底盘控制。
+同一入口还发布 `/lio/base_odometry` 和 `/lio/base_pose`，无需录制或另外启动转换节点。
+它们随 LIO 更新，不等待相机或深度投影完成。
 RealSense 原深度流仍开启以维持驱动原有的 camera_link 基准，但关闭深度对齐和 RGB-D 帧组同步；
 输出深度全部来自 MID360，投影节点不读取 RealSense 深度。
 
@@ -78,6 +81,7 @@ cd /home/agilex/my_ws/lidar_rgbd_capture
 
 默认会把 RGB、雷达投影深度、图像时刻的相机位姿、原始双雷达、已发布的原始 IMU、
 LIO odometry、TF、标定与会话信息一起录入最终 bag，不需要额外加 `--raw-sensors`。
+新的底盘里程计和底盘 PoseStamped 也会保留在 bag 中。
 录制器上限默认 10 Hz，用于接收投影的约 6 Hz 输出，不会生成或补出 10 Hz 帧。
 
 也可以指定时长：
@@ -181,12 +185,14 @@ NPY 模式支持逐帧内参；模型发生变化时不生成全局 YAML，读�
 | RGB/深度共用的内参 | `/lidar_rgbd/rgb/camera_info` | `sensor_msgs/CameraInfo` | K、D、R、P 等；深度对应同一 RGB 像素模型 |
 | 深度侧内参 | `/lidar_rgbd/depth/camera_info` | `sensor_msgs/CameraInfo` | 与 RGB 侧相同，可按下游接口需要选用 |
 | FAST-LIO 原始里程计 | `/lio/odometry` | `nav_msgs/Odometry` | `header.frame_id=lio_map`，`child_frame_id=body`，通常约 10 Hz |
+| **底盘 LIO 里程计（控制/导航使用）** | `/lio/base_odometry` | `nav_msgs/Odometry` | `header.frame_id=lio_map`，`child_frame_id=base_link`，与原 LIO 同时间戳/频率 |
+| 底盘位姿 | `/lio/base_pose` | `geometry_msgs/PoseStamped` | `T_lio_map_base_link`，与 `/lio/base_odometry` 同时间戳；平移米、四元数 xyzw |
 | 图像对应的相机位姿 | `/lidar_rgbd/camera_pose` | `geometry_msgs/PoseStamped` | `T_lio_map_camera_color_optical_frame`，与输出 RGB/深度同时间戳 |
 | 可选：有效深度掩码 | `/lidar_rgbd/valid_mask` | `sensor_msgs/Image` | `mono8`，255 有效、0 无效，与 RGB 同时间戳 |
 | 可选：逐帧投影诊断 | `/lidar_rgbd/projection` | `std_msgs/String` | JSON，用 `rgb_stamp_ns` 关联 RGB，可读覆盖率、输出延迟和点时间范围 |
 | 坐标变换 | `/tf`、`/tf_static` | `tf2_msgs/TFMessage` | LIO 动态 TF 和传感器静态安装关系 |
 
-三路核心订阅是 `/lidar_rgbd/rgb/image_raw`、`/lidar_rgbd/depth/image_raw`、`/lio/odometry`。
+面向实车的三路核心订阅是 `/lidar_rgbd/rgb/image_raw`、`/lidar_rgbd/depth/image_raw`、`/lio/base_odometry`。
 如果下游要把 RGB-D 转到世界系，还应订阅内参以及 `/lidar_rgbd/camera_pose`。
 `/lidar_rgbd/rgb/image_raw` 保留 RealSense 原像素，只在成功生成雷达深度时一起转发，
 因此适合成对消费；相机驱动的原始输入 `/camera/color/image_raw` 可能包含没有配套深度的帧。
@@ -248,9 +254,9 @@ def on_rgbd(rgb_msg, depth_msg, info_msg, pose_msg):
 
 
 def on_odom(msg):
-    body_pose = msg.pose.pose       # T_lio_map_body，区别于相机位姿
-    rospy.loginfo_throttle(2.0, 'LIO body xyz=(%.3f, %.3f, %.3f)' %
-                          (body_pose.position.x, body_pose.position.y, body_pose.position.z))
+    base_pose = msg.pose.pose       # T_lio_map_base_link，区别于相机位姿
+    rospy.loginfo_throttle(2.0, 'LIO base xyz=(%.3f, %.3f, %.3f)' %
+                          (base_pose.position.x, base_pose.position.y, base_pose.position.z))
 
 
 rospy.init_node('lidar_rgbd_consumer')
@@ -262,7 +268,7 @@ info_sub = message_filters.Subscriber('/lidar_rgbd/rgb/camera_info', CameraInfo)
 pose_sub = message_filters.Subscriber('/lidar_rgbd/camera_pose', PoseStamped)
 sync = message_filters.TimeSynchronizer([rgb_sub, depth_sub, info_sub, pose_sub], queue_size=10)
 sync.registerCallback(on_rgbd)
-odom_sub = rospy.Subscriber('/lio/odometry', Odometry, on_odom, queue_size=20)
+odom_sub = rospy.Subscriber('/lio/base_odometry', Odometry, on_odom, queue_size=20)
 rospy.spin()
 ```
 
@@ -279,10 +285,61 @@ source /home/agilex/my_ws/lidar_rgbd_capture/devel/setup.bash
 `rostopic hz /lidar_rgbd/depth/image_raw`、`rostopic hz /lio/odometry` 查看发布频率，
 用 `rostopic echo -n 1 /lidar_rgbd/camera_pose` 查看一条相机位姿。
 
+## 底盘 base_link 位姿与控制
+
+`base_link` 使用车辆坐标约定：x 向前、y 向左、z 向上。
+转换复用已有静态 TF `body → mid360_a_lidar → base_link`，计算：
+
+`T_lio_map_base_link = T_lio_map_body × T_body_base_link`
+
+每条原始 LIO 位姿转换后保留其扫描参考时间，不从相机位姿倒推，不等待 RGB-D 帧组，
+不外推或把旧位姿改写成当前时间。已有 TF 链可查询 `lio_map → base_link`；新节点只增加消息话题，
+不重复广播一条直接 TF，避免给 `base_link` 增加第二个父节点。
+
+原 LIO 的 `twist` 没有填充；新 `/lio/base_odometry.twist` 使用相邻底盘位姿差分，表达在当前
+`base_link` 中，是采样间隔内的平均速度，不是瞬时 IMU 测量。第一条或间隔超过 0.5 s 时无速度估计，
+保留零值；速度协方差始终设为大值（对角 1e6），因为无法取得跨时刻滤波相关性。
+pose 协方差按本机 FAST-LIO 的实际块顺序、姿态误差坐标和底盘偏移转换，不包含未知的安装标定误差。
+当前上游交换了位置/姿态协方差块；此节点按部署版本修正，升级 FAST-LIO 后应复核该约定。
+
+安装参数来自 `/home/agilex/agilex_ws/lio_ws/src/agilex_lio/config/mounts.yaml` 和所选 IMU 的 LIO yaml，
+仍是厂家/名义初值。默认 HI226 配置假设外部 IMU 与底盘系重合；改用 MID360 IMU 时也会按相应 TF
+转换，不能简单把 `body` 重命名为 `base_link`。实际精度需要实车量测/标定后评估。
+
+启动顺序（每条长时间运行的命令放在单独终端）：
+
+```bash
+# 终端 A：统一传感器入口
+cd /home/agilex/my_ws/lidar_rgbd_capture
+./start_sensors.sh
+
+# 终端 B：确认 LIO 已更新，再启动底盘；首次先按底盘 README 配置 CAN
+cd /home/agilex/my_ws/chassis_control
+./start_control.sh hardware
+
+# 终端 C
+cd /home/agilex/my_ws/chassis_control
+./keyboard.sh
+```
+
+真实底盘控制默认订阅 `/lio/base_odometry`。缺少 TF、LIO 未就绪或数据过期时不能启用；
+运动中丢失 LIO 会停止并禁用，不自动回退到轮式反馈。CAN 反馈仍用于驱动状态、故障和静止检查。
+所有节点应连接同一 ROS master。加载本项目环境后可以检查：
+
+```bash
+rostopic hz /lio/base_odometry
+rostopic echo -n 1 /lio/base_odometry
+rosrun tf tf_echo lio_map base_link
+```
+
+底盘里程计与 RGB 的时间戳不必相同，单独订阅，不加入图像精确同步帧组。
+`base_max_source_age` 默认 0.8 s，是拒收旧数据的上限，不代表真实反馈延迟或控制精度。
+底盘操作详见相邻项目 [chassis_control](../chassis_control/README.md)。
+
 ## Bag 数据
 
 以下 `/dataset/*` 是录制器写入 bag 的话题名；`start_sensors.sh` 不会把它们作为实时 topic 发布。
-实时应用订阅上面的 `/lidar_rgbd/*` 和 `/lio/odometry` 即可。
+实时应用订阅上面的 `/lidar_rgbd/*` 和 `/lio/base_odometry` 即可。
 
 最终每组 `/dataset/*` 有 7 条消息，bag 时间一致、frame_index 连续：
 
@@ -295,7 +352,7 @@ source /home/agilex/my_ws/lidar_rgbd_capture/devel/setup.bash
 | `/dataset/body_to_camera` | 实际使用的相机安装变换 |
 | `/dataset/frame` | JSON：原始时间、位姿插值、雷达来源及点时间窗口 |
 
-同时保留 `/lio/odometry`、`/tf`、`/tf_static`、`/dataset/session`、`/dataset/report`、
+同时保留 `/lio/odometry`、`/lio/base_odometry`、`/lio/base_pose`、`/tf`、`/tf_static`、`/dataset/session`、`/dataset/report`、
 两路 `/livox/lidar_192_168_1_113` 和 `...154`，以及发布中的原始 IMU、相机 metadata。
 原始雷达为 driver2 CustomMsg，完整保留逐点时间；服务器只读 `/dataset/*` 时不需要 Livox 包。
 schema_version=2，新增投影来源校验，不与旧 RealSense 深度 bag 混淆。
@@ -328,7 +385,7 @@ Z-buffer 只能处理已采到的点之间的遮挡，不能证明相机视线�
 ## 验证
 
 ```bash
-bash -c 'source /opt/ros/noetic/setup.bash; /usr/bin/python3 -m unittest discover -s tests -p test_recorder.py -v'
+bash -c 'source /opt/ros/noetic/setup.bash; /usr/bin/python3 -m unittest discover -s tests -p "test_*.py" -v'
 bash -c 'source devel/setup.bash; /usr/bin/python3 tests/smoke_pipeline.py'
 # 接上设备后，静态实机测试（会自行启停私有 ROS master、传感器和录制，不控制底盘）
 bash -c 'source devel/setup.bash; /usr/bin/python3 tests/smoke_pipeline.py --hardware --duration 20'
@@ -336,7 +393,15 @@ bash -c 'source devel/setup.bash; /usr/bin/python3 tests/smoke_pipeline.py --har
 
 合成测试用已知旋转和平移轨迹、静止三维点和非零镜头畸变驱动真实 C++ 节点，
 扫描内点顺序故意打乱，逐像素对照解析投影和相机位姿，并验证原始数据录制、合并和完整帧组校验。
+新增 6 项底盘转换测试覆盖三维偏移、旋转、协方差数值雅可比、偏心 IMU 原地旋转和角度跨 ±π；
+合成录制还复算 `/lio/base_odometry` 并核对新话题保存在 bag 中。
 测试 bag 和日志保留于输出的临时目录。版本化结果放在 verification/，大 bag 不进 Git。
+
+也可用本机已有实机 bag 回放检查底盘转换，不启动硬件：
+
+```bash
+bash -c 'source devel/setup.bash; /usr/bin/python3 tests/replay_base_odometry.py datasets/static_trial_20261121_2138.bag'
+```
 
 来源：recorder 三个 Python 文件及录制测试基于用户已有
 `agilex_ws/rgbd_capture`，基线提交 `77a9cd2`；本项目修改了输入、schema、投影来源验证及默认原始录制。
