@@ -169,12 +169,120 @@ NPY 模式支持逐帧内参；模型发生变化时不生成全局 YAML，读�
 按 `frames.jsonl` 的编号、路径和时间戳关联数据。服务器接收最终 `.bag` 即可；
 会话与录制报告也保存在 bag 内。样例和实测预览见文末。
 
-## 在线发布与 bag
+## 实时订阅（不录制）
 
-在线话题：`/lidar_rgbd/rgb/image_raw`、`/lidar_rgbd/depth/image_raw`、
-`/lidar_rgbd/rgb/camera_info`、`/lidar_rgbd/depth/camera_info`、
-`/lidar_rgbd/camera_pose`、`/lidar_rgbd/valid_mask`、`/lidar_rgbd/projection`。
-可用 rqt_image_view 查看 RGB、深度及掩码。深度图的空洞是正常输出。
+只启动 `./start_sensors.sh`，等 IMU 初始化和投影 `frames=...` 持续增长，即可运行自己的订阅程序；
+无需执行 `./run.sh record`。传感器、LIO 和在线投影独立于录制器工作。
+
+| 需要的数据 | 实时 topic | ROS 消息类型 | 数据约定 |
+|---|---|---|---|
+| 与雷达深度配套的 RealSense RGB | `/lidar_rgbd/rgb/image_raw` | `sensor_msgs/Image` | 原相机像素转发，本机为 `rgb8`，约 6 Hz |
+| MID360 替换深度 | `/lidar_rgbd/depth/image_raw` | `sensor_msgs/Image` | `32FC1`，相机前向 Z，单位米，空洞 NaN，约 6 Hz |
+| RGB/深度共用的内参 | `/lidar_rgbd/rgb/camera_info` | `sensor_msgs/CameraInfo` | K、D、R、P 等；深度对应同一 RGB 像素模型 |
+| 深度侧内参 | `/lidar_rgbd/depth/camera_info` | `sensor_msgs/CameraInfo` | 与 RGB 侧相同，可按下游接口需要选用 |
+| FAST-LIO 原始里程计 | `/lio/odometry` | `nav_msgs/Odometry` | `header.frame_id=lio_map`，`child_frame_id=body`，通常约 10 Hz |
+| 图像对应的相机位姿 | `/lidar_rgbd/camera_pose` | `geometry_msgs/PoseStamped` | `T_lio_map_camera_color_optical_frame`，与输出 RGB/深度同时间戳 |
+| 可选：有效深度掩码 | `/lidar_rgbd/valid_mask` | `sensor_msgs/Image` | `mono8`，255 有效、0 无效，与 RGB 同时间戳 |
+| 可选：逐帧投影诊断 | `/lidar_rgbd/projection` | `std_msgs/String` | JSON，用 `rgb_stamp_ns` 关联 RGB，可读覆盖率、输出延迟和点时间范围 |
+| 坐标变换 | `/tf`、`/tf_static` | `tf2_msgs/TFMessage` | LIO 动态 TF 和传感器静态安装关系 |
+
+三路核心订阅是 `/lidar_rgbd/rgb/image_raw`、`/lidar_rgbd/depth/image_raw`、`/lio/odometry`。
+如果下游要把 RGB-D 转到世界系，还应订阅内参以及 `/lidar_rgbd/camera_pose`。
+`/lidar_rgbd/rgb/image_raw` 保留 RealSense 原像素，只在成功生成雷达深度时一起转发，
+因此适合成对消费；相机驱动的原始输入 `/camera/color/image_raw` 可能包含没有配套深度的帧。
+
+实时深度始终是 **float32 米制、NaN 空洞**。之前约定的 **uint16 毫米、0 空洞**
+是离线 `export` 的 PNG 格式，订阅实时 `32FC1` 后不要再除以 1000。
+有效深度条件为 `isfinite(depth) & (depth > 0)`。
+
+FAST-LIO 的 `/lio/odometry.pose.pose` 描述 `body` 的世界位姿；`body` 是所选 IMU 系，
+默认 HI226，`imu_source:=mid360` 时为 MID360 A 内置 IMU 系。它不能直接作为相机光学系位姿使用。
+当前上游发布函数没有填充 `twist`，不要把其中默认的零值当成已测得的速度。
+`/lidar_rgbd/camera_pose` 已完成 LIO 轨迹插值和安装外参变换，可直接用于图像对应的相机位姿；
+其 `header.frame_id=lio_map`，光学系为 x 向右、y 向下、z 向前，平移单位米、四元数顺序 xyzw。
+
+RGB、投影深度、CameraInfo 和相机 PoseStamped 的 `header.stamp` 相同，建议用
+`message_filters.TimeSynchronizer` 按时间戳精确配对；不要按消息到达顺序拼接。
+`/lio/odometry` 的时间是雷达扫描参考时刻，与 RGB 不必相同，应单独订阅，不加入这组精确同步。
+默认相机时间偏移为 0；改过 `camera_time_offset` 时，PoseStamped 仍保留 RGB header 便于关联，
+其几何查询时刻是 `t_rgb + offset`，详情见投影 JSON 的 `pose_query_stamp_ns`。
+
+下面是最小 Python 示例，可保存为 `/tmp/subscribe_lidar_rgbd.py`。
+它使用 NumPy 按消息编码、大小端和行步长读取图像；在 `on_rgbd` 中接入自己的算法即可。
+
+```python
+import numpy as np
+import rospy
+import message_filters
+from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+
+
+def rgb_array(msg):
+    if msg.encoding not in ('rgb8', 'bgr8'):
+        raise ValueError('Expected rgb8/bgr8, got ' + msg.encoding)
+    image = np.ndarray((msg.height, msg.width, 3), dtype=np.uint8,
+                       buffer=msg.data, strides=(msg.step, 3, 1))
+    return (image[:, :, ::-1] if msg.encoding == 'bgr8' else image).copy()
+
+
+def depth_array(msg):
+    if msg.encoding != '32FC1':
+        raise ValueError('Expected 32FC1, got ' + msg.encoding)
+    dtype = np.dtype('>f4' if msg.is_bigendian else '<f4')
+    return np.ndarray((msg.height, msg.width), dtype=dtype,
+                      buffer=msg.data, strides=(msg.step, 4)).astype(np.float32, copy=True)
+
+
+def on_rgbd(rgb_msg, depth_msg, info_msg, pose_msg):
+    rgb = rgb_array(rgb_msg)        # H×W×3，RGB uint8
+    depth_m = depth_array(depth_msg)  # H×W，单位米
+    with np.errstate(invalid='ignore'):
+        valid = np.isfinite(depth_m) & (depth_m > 0)
+    K = np.asarray(info_msg.K).reshape(3, 3)
+    camera_pose = pose_msg.pose     # T_lio_map_camera_optical
+    # 在这里使用 rgb、depth_m、valid、K、info_msg.D 和 camera_pose。
+    rospy.loginfo_throttle(2.0, 'RGB-D t=%.9f, valid=%.2f%%' %
+                          (rgb_msg.header.stamp.to_sec(), 100.0 * valid.mean()))
+
+
+def on_odom(msg):
+    body_pose = msg.pose.pose       # T_lio_map_body，区别于相机位姿
+    rospy.loginfo_throttle(2.0, 'LIO body xyz=(%.3f, %.3f, %.3f)' %
+                          (body_pose.position.x, body_pose.position.y, body_pose.position.z))
+
+
+rospy.init_node('lidar_rgbd_consumer')
+rgb_sub = message_filters.Subscriber('/lidar_rgbd/rgb/image_raw', Image,
+                                    queue_size=5, buff_size=8*1024*1024)
+depth_sub = message_filters.Subscriber('/lidar_rgbd/depth/image_raw', Image,
+                                      queue_size=5, buff_size=8*1024*1024)
+info_sub = message_filters.Subscriber('/lidar_rgbd/rgb/camera_info', CameraInfo)
+pose_sub = message_filters.Subscriber('/lidar_rgbd/camera_pose', PoseStamped)
+sync = message_filters.TimeSynchronizer([rgb_sub, depth_sub, info_sub, pose_sub], queue_size=10)
+sync.registerCallback(on_rgbd)
+odom_sub = rospy.Subscriber('/lio/odometry', Odometry, on_odom, queue_size=20)
+rospy.spin()
+```
+
+在另一个终端运行（先进入 bash，再加载环境）：
+
+```bash
+bash
+source /home/agilex/my_ws/lidar_rgbd_capture/devel/setup.bash
+/usr/bin/python3 /tmp/subscribe_lidar_rgbd.py
+```
+
+订阅程序须连接与启动脚本相同的 ROS master；跨机器运行时，还需正确设置
+`ROS_MASTER_URI` 和可互通的 `ROS_IP` / `ROS_HOSTNAME`。也可在加载环境后分别运行
+`rostopic hz /lidar_rgbd/depth/image_raw`、`rostopic hz /lio/odometry` 查看发布频率，
+用 `rostopic echo -n 1 /lidar_rgbd/camera_pose` 查看一条相机位姿。
+
+## Bag 数据
+
+以下 `/dataset/*` 是录制器写入 bag 的话题名；`start_sensors.sh` 不会把它们作为实时 topic 发布。
+实时应用订阅上面的 `/lidar_rgbd/*` 和 `/lio/odometry` 即可。
 
 最终每组 `/dataset/*` 有 7 条消息，bag 时间一致、frame_index 连续：
 
